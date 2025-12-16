@@ -7,11 +7,13 @@ from typing import Tuple, List
 import numpy as np
 import scipy
 import pyscf
-
+from pyscf.cc.addons import spatial2spin
 
 class OVOS:
 
 	"""
+	The OVOS algorithm minimizes the second-order correlation energy (MP2) using orbital rotations. 
+
 	Implemenation is based on:
 	https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
 
@@ -47,10 +49,23 @@ class OVOS:
 		self.nelec = self.mol.nelec
 
 
-	def _t1(self, mo_coeffs, e_rhf) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+	
+	def Fock_matrix(self, U) -> Tuple[np.ndarray, np.ndarray]:
+
+
+		# Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
+		# eigval, eigvec = scipy.linalg.eig(Fmo)
+		# sorting = np.argsort(eigval)
+		# eigval = np.real(eigval[sorting])
+		# eigvec = np.real(eigvec[:, sorting])
+
+		return NotImplementedError 
+
+
+	def MP2_energy(self, mo_coeffs, E_rhf, spin_orbital_basis: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
      
 		"""
-		MP1 amplitudes
+		MP2 energy for restricted orbitals 
 		"""
 
 		Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
@@ -59,40 +74,77 @@ class OVOS:
 		eigval = np.real(eigval[sorting])
 		eigvec = np.real(eigvec[:, sorting])
 
-		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
 
 		# i,j -> occupied orbitals in the HF state 
 		# a,b -> empty orbitals in the HF state
 
-		t1_tensor = np.zeros((self.n_orbs,self.n_orbs,self.n_orbs,self.n_orbs))
+		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
 		E_corr = 0
 		nelec_ = self.nelec[0] + self.nelec[1]
-		for i in range(int(nelec_/2)):
-			for j in range(int(nelec_/2)):
-				for a in range(int(nelec_/2),self.n_orbs):
-					for b in range(int(nelec_/2),self.n_orbs):
-						#print("i,j = ",i,j)
-						#print("a,b = ",a,b, "\n")
-
-						E_corr += -1.0*(eri_4fold_mo[a,i,b,j]*(2*eri_4fold_mo[i,a,j,b] - eri_4fold_mo[i,b,j,a]) / 
-							(eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
-
-					
-						t1 =  -1.0*(eri_4fold_mo[a,i,b,j] / (eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
-						t1_tensor[a,i,b,j] = t1
-						#print(t1)
-						
-		E_MP2 = e_rhf + E_corr
 		
+		# MP2 in spin-orbital basis, Eq. 14.2.53 in Molecular electronic-structure theory book				
+		if spin_orbital_basis:
+			eri_4fold_spin_mo = spatial2spin(eri_4fold_mo, orbspin=None)
+			t1_tensor = np.zeros((2*self.n_orbs,2*self.n_orbs,2*self.n_orbs,2*self.n_orbs))
+			eigval_spin_mo = []
+			for i in eigval:
+				for rep in range(2):
+					eigval_spin_mo.append(float(i))
+
+			for I in range(int(nelec_)):
+				for J in range(int(nelec_)):
+					if I > J:
+						for A in range(int(nelec_),2*self.n_orbs):
+							for B in range(int(nelec_),2*self.n_orbs):
+								if A > B:
+									#MP2 correlation energy for restricted orbitals: 
+									E_corr += -1.0*((eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I])**2 
+										/ (eigval_spin_mo[A] + eigval_spin_mo[B] - eigval_spin_mo[I] - eigval_spin_mo[J]) )
+
+									#MP1 amplitudes:
+									t1 =  -1.0*( (eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I]) / (eigval_spin_mo[A] + eigval_spin_mo[B] - eigval_spin_mo[I] - eigval_spin_mo[J]) )
+									t1_tensor[A,I,B,J] = t1
+									#print(t1)
+
 		
+		# MP2 in spatial orbital basis, Equation 14.4.56 in Molecular electronic-structure theory book
+		if spin_orbital_basis is False:
+			t1_tensor = np.zeros((self.n_orbs,self.n_orbs,self.n_orbs,self.n_orbs))
+			for i in range(int(nelec_/2)):
+				for j in range(int(nelec_/2)):
+					for a in range(int(nelec_/2),self.n_orbs):
+						for b in range(int(nelec_/2),self.n_orbs):
+							#print("i,j = ",i,j)
+							#print("a,b = ",a,b, "\n")
+
+							#MP2 correlation energy for restricted closed-shell: 
+							E_corr += -1.0*(eri_4fold_mo[a,i,b,j]*(2*eri_4fold_mo[i,a,j,b] - eri_4fold_mo[i,b,j,a]) / 
+								(eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
+
+							#MP1 amplitudes:
+							t1 =  -1.0*(eri_4fold_mo[a,i,b,j] / (eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
+							t1_tensor[a,i,b,j] = t1
+							#print(t1)
+
+
+		E_MP2 = E_rhf + E_corr
+
 		MP2 = self.rhf.MP2().run()
 		assert np.abs(E_corr - MP2.e_corr) < 1e-6, "np.abs(E_corr - self.rhf.MP2().run().e_corr) < 1e-6"  
-		assert np.abs(E_MP2 - MP2.e_tot) < 1e-6, "np.abs(E_corr - self.rhf.MP2().run().e_corr) < 1e-6"  
+		assert np.abs(E_MP2 - MP2.e_tot) < 1e-6, "np.abs(E_MP2 - MP2.e_tot) < 1e-6"  
 
 		return E_MP2, t1_tensor 
 
 	
-	def _orbital_rotation(self,):
+	def orbital_rotation(self, mo_coeffs):
+
+		"""
+		First- and second-order derivatives of the second-order Hylleraas functional
+		Equations 11a and 11b in https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
+		"""
+
+		#Gradient
+		G = np.zeros((self.n_orbs, self.n_orbs))
 
 		return NotImplementedError
 
@@ -105,7 +157,6 @@ class OVOS:
 		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
 
 		J = 0
-
 
 		raise NotImplementedError
 		
@@ -126,7 +177,7 @@ rhf = pyscf.scf.RHF(mol).run()
 mo_coeff = rhf.mo_coeff 
 
 run_OVOS = OVOS(mol=mol, num_vir_ops=3)
-run_OVOS._t1(mo_coeffs = mo_coeff, e_rhf = rhf.e_tot)
+run_OVOS.MP2_energy(mo_coeffs = mo_coeff, E_rhf = rhf.e_tot)
 
 
 
