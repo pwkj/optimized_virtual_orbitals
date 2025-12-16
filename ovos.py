@@ -510,7 +510,8 @@ class OVOS:
 				pass
 					# Iterative procedure: Transform integrals using previous rotation matrix
 			else:
-				mo_coeffs = self._transform_mo_coeffs(self, mo_coeffs, active_virt_indices, inactive_virt_indices, rotation_params)
+				#mo_coeffs = self._transform_mo_coeffs(self, mo_coeffs, active_virt_indices, inactive_virt_indices, rotation_params)
+				pass
 
 				# Compute t1 amplitudes
 			t1_tensor = self._t1(mo_coeffs=mo_coeffs,
