@@ -187,7 +187,8 @@ class OVOS:
 									# Calculate MP1 amplitudes, t1, for each combination of (A,I,B,J)
 									t1 =  -1.0*( (eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I]) / (eigval_spin_mo[A] + eigval_spin_mo[B] - eigval_spin_mo[I] - eigval_spin_mo[J]) )
 									t1_tensor[A,I,B,J] = t1
-
+									
+		# MP2 in spatial orbital basis, Equation 14.4.56 in Molecular electronic-structure theory book
 		if spin_orbital_basis is False:
 			# Build t1 amplitudes only for active virtual orbitals
 			for i in range(n_occ):
@@ -260,6 +261,7 @@ class OVOS:
 									# Store individual contributions in tensor
 									E_corr_tensor[A,I,B,J] = E_corr
 
+		# MP2 in spatial orbital basis, Equation 14.4.56 in Molecular electronic-structure theory book
 		if spin_orbital_basis is False:
 			# Build correlation energy
 			for i in range(int(nelec_/2)):
