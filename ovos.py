@@ -9,6 +9,8 @@ import scipy
 import pyscf
 from pyscf.cc.addons import spatial2spin
 
+
+
 class OVOS:
 
 	"""
@@ -25,9 +27,9 @@ class OVOS:
         Number of optimized virtual orbitals.
     """
 
-	def __init__(self, mol: pyscf.gto.Mole, num_vir_ops: int) -> None:
+	def __init__(self, mol: pyscf.gto.Mole, num_active_orbs: int) -> None:
 		self.mol = mol
-		self.num_vir_ops = num_vir_ops
+		self.num_active_orbs = num_active_orbs
 
 		# Restricted Hartree-Fock calculation
 		self.rhf = pyscf.scf.RHF(mol).run()
@@ -45,9 +47,26 @@ class OVOS:
 		# Number of orbitals
 		self.n_orbs = int(self.rhf.mo_coeff.shape[0])
 		
-		# Number of orbitals
-		self.nelec = self.mol.nelec
+		# Number of electrons
+		self.nelec = self.mol.nelec[0] + self.mol.nelec[1]
 
+		# Number of inactive orbitals
+		#i,j indices (occupied orbitals)
+		self.active_spin_occ_indices = [i for i in range(int(self.nelec))]
+		#a, b indices (inoccupied orbitals in active space)
+		self.active_spin_inocc_indices = [i for i in range(self.active_spin_occ_indices[-1]+1,self.active_spin_occ_indices[-1]+1+int(2*self.num_active_orbs-self.nelec))]
+		#print(self.active_spin_occ_indices)
+		#print(self.active_spin_inocc_indices)
+
+		assert self.n_orbs >= self.num_active_orbs, "Your num_active_orbs is too large"  
+
+		#build initial Fock matrix
+		# Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
+		# self.F_spin = spatial2spin(Fmo)
+		# eigval, eigvec = scipy.linalg.eig(self.F_spin)
+		# sorting = np.argsort(eigval)
+		# self.eigval = np.real(eigval[sorting])
+		# self.eigvec = np.real(eigvec[:, sorting])
 
 	
 	def Fock_matrix(self, U) -> Tuple[np.ndarray, np.ndarray]:
@@ -75,13 +94,13 @@ class OVOS:
 		eigvec = np.real(eigvec[:, sorting])
 
 
-		# i,j -> occupied orbitals in the HF state 
-		# a,b -> empty orbitals in the HF state
+		# i,j -> occupied orbitals 
+		# a,b -> empty orbitals in active space
 
 		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
+
 		E_corr = 0
-		nelec_ = self.nelec[0] + self.nelec[1]
-		
+
 		# MP2 in spin-orbital basis, Eq. 14.2.53 in Molecular electronic-structure theory book				
 		if spin_orbital_basis:
 			eri_4fold_spin_mo = spatial2spin(eri_4fold_mo, orbspin=None)
@@ -91,11 +110,11 @@ class OVOS:
 				for rep in range(2):
 					eigval_spin_mo.append(float(i))
 
-			for I in range(int(nelec_)):
-				for J in range(int(nelec_)):
+			for I in self.active_spin_occ_indices :
+				for J in self.active_spin_occ_indices :
 					if I > J:
-						for A in range(int(nelec_),2*self.n_orbs):
-							for B in range(int(nelec_),2*self.n_orbs):
+						for A in self.active_spin_inocc_indices:
+							for B in self.active_spin_inocc_indices:
 								if A > B:
 									#MP2 correlation energy for restricted orbitals: 
 									E_corr += -1.0*((eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I])**2 
@@ -107,13 +126,14 @@ class OVOS:
 									#print(t1)
 
 		
+
 		# MP2 in spatial orbital basis, Equation 14.4.56 in Molecular electronic-structure theory book
 		if spin_orbital_basis is False:
 			t1_tensor = np.zeros((self.n_orbs,self.n_orbs,self.n_orbs,self.n_orbs))
-			for i in range(int(nelec_/2)):
-				for j in range(int(nelec_/2)):
-					for a in range(int(nelec_/2),self.n_orbs):
-						for b in range(int(nelec_/2),self.n_orbs):
+			for i in range(int(self.nelec/2)):
+				for j in range(int(self.nelec/2)):
+					for a in range(int(self.nelec/2),self.n_orbs):
+						for b in range(int(self.nelec/2),self.n_orbs):
 							#print("i,j = ",i,j)
 							#print("a,b = ",a,b, "\n")
 
@@ -176,7 +196,7 @@ mol = pyscf.M(atom=atom, basis=basis, unit=unit)
 rhf = pyscf.scf.RHF(mol).run()
 mo_coeff = rhf.mo_coeff 
 
-run_OVOS = OVOS(mol=mol, num_vir_ops=3)
+run_OVOS = OVOS(mol=mol, num_active_orbs=6)
 run_OVOS.MP2_energy(mo_coeffs = mo_coeff, E_rhf = rhf.e_tot)
 
 
