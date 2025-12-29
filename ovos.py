@@ -23,51 +23,66 @@ class OVOS:
     ----------
     mol : pyscf.M
         PySCF molecule object.
-    num_vir_ops : int
-        Number of optimized virtual orbitals.
+    num_opt_virtual_orbs : int
+        Number of optimized virtual spin orbitals.
     """
 
-	def __init__(self, mol: pyscf.gto.Mole, num_active_orbs: int) -> None:
+	def __init__(self, mol: pyscf.gto.Mole, num_opt_virtual_orbs: int) -> None:
 		self.mol = mol
-		self.num_active_orbs = num_active_orbs
+		self.num_opt_virtual_orbs = num_opt_virtual_orbs
 
-		# Restricted Hartree-Fock calculation
-		self.rhf = pyscf.scf.RHF(mol).run()
-		self.e_rhf = self.rhf.e_tot
+		# Set up unrestricted Hartree-Fock calculation
+		self.uhf = pyscf.scf.UHF(mol).run()
+		self.e_rhf = self.uhf.e_tot
 		self.h_nuc = mol.energy_nuc()
 
-		# Build fock matrix in AO basis
-		self.F_matrix  = self.rhf.get_fock()
+		# MO coefficients 
+		self.mo_coeffs = self.uhf.mo_coeff
 
+		# Fock matrix
+		Fao = self.uhf.get_fock()
+		Fmo_a = self.mo_coeffs[0].T @ Fao[0] @ self.mo_coeffs[0]
+		Fmo_b = self.mo_coeffs[1].T @ Fao[1] @ self.mo_coeffs[1]
+		Fmo = (Fmo_a, Fmo_b)
+		eigval_a, eigvec_a = scipy.linalg.eig(Fmo_a)
+		eigval_b, eigvec_b = scipy.linalg.eig(Fmo_b)
+		sorting_a = np.argsort(eigval_a)
+		sorting_b = np.argsort(eigval_b)
+		mo_energy_a = np.real(eigval_a[sorting_a])
+		mo_energy_b = np.real(eigval_b[sorting_b])
+		self.orbital_energies = []
+		for i in range(eigval_a.shape[0]):
+			self.orbital_energies.append(float(mo_energy_a[i]))
+			self.orbital_energies.append(float(mo_energy_b[i]))
+		
 		# Integrals in AO basis
 		self.hcore_ao = mol.intor("int1e_kin") + mol.intor("int1e_nuc")
 		self.overlap = mol.intor('int1e_ovlp')
 		self.eri_4fold_ao = mol.intor('int2e_sph', aosym=1)
 
 		# Number of orbitals
-		self.n_orbs = int(self.rhf.mo_coeff.shape[0])
+		self.tot_num_spin_orbs = int(2*self.mo_coeffs.shape[1])
 		
 		# Number of electrons
 		self.nelec = self.mol.nelec[0] + self.mol.nelec[1]
 
-		# Number of inactive orbitals
-		#i,j indices (occupied orbitals)
-		self.active_spin_occ_indices = [i for i in range(int(self.nelec))]
-		#a, b indices (inoccupied orbitals in active space)
-		self.active_spin_inocc_indices = [i for i in range(self.active_spin_occ_indices[-1]+1,self.active_spin_occ_indices[-1]+1+int(2*self.num_active_orbs-self.nelec))]
-		#print(self.active_spin_occ_indices)
-		#print(self.active_spin_inocc_indices)
+		# Build index lists of active and inactive spaces
+		#I,J indices -> occupied spin orbitals
+		self.active_occ_indices = [i for i in range(int(self.nelec))]
+		#A, B indices -> inoccupied spin orbitals in active space
+		self.active_inocc_indices = [i for i in range(self.active_occ_indices[-1]+1,int((self.num_opt_virtual_orbs+self.nelec)))]
+		#actice + inactive space
+		self.active_inactive_indices = [i for i in range(self.active_occ_indices[-1]+1,int((self.tot_num_spin_orbs)))]
+		#print(self.active_inactive_indices)
+		#print(self.active_inocc_indices)
+		#print(int(self.num_opt_virtual_orbs+self.nelec))
 
-		assert self.n_orbs >= self.num_active_orbs, "Your num_active_orbs is too large"  
+		print("Total number of spin orbitals: ", self.tot_num_spin_orbs)
+		print("Active space size: ", self.num_opt_virtual_orbs + self.nelec)
+		print("Number of optimized spin orbitals: ", self.num_opt_virtual_orbs)
+		print("Number of occupied spin orbitals: ", self.nelec)
 
-		#build initial Fock matrix
-		# Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
-		# self.F_spin = spatial2spin(Fmo)
-		# eigval, eigvec = scipy.linalg.eig(self.F_spin)
-		# sorting = np.argsort(eigval)
-		# self.eigval = np.real(eigval[sorting])
-		# self.eigvec = np.real(eigvec[:, sorting])
-
+		assert self.tot_num_spin_orbs >= self.num_opt_virtual_orbs+self.nelec, "Your space num_opt_virtual_orbs is too large"  
 	
 	def Fock_matrix(self, U) -> Tuple[np.ndarray, np.ndarray]:
 
@@ -81,90 +96,91 @@ class OVOS:
 		return NotImplementedError 
 
 
-	def MP2_energy(self, mo_coeffs, E_rhf, spin_orbital_basis: bool = True) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
+	def MP2_energy(self) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
      
 		"""
-		MP2 energy for restricted orbitals 
+		MP2 energy for unrestricted orbitals 
 		"""
+		
+		norb_alpha = self.mo_coeffs[0].shape[1]
+		norb_beta = self.mo_coeffs[1].shape[1]
 
-		Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
-		eigval, eigvec = scipy.linalg.eig(Fmo)
-		sorting = np.argsort(eigval)
-		eigval = np.real(eigval[sorting])
-		eigvec = np.real(eigvec[:, sorting])
+		# The ao2mo.kernel function can handle the four-index transformation for different orbital sets.
+		# Note: PySCF stores 2e integrals in chemists' notation: (ij|kl) = <ik|jl> in physicists' notation.
 
+		# --- (alpha alpha | alpha alpha) integrals ---
+		eri_aaaa = pyscf.ao2mo.kernel(self.eri_4fold_ao, [self.mo_coeffs[0], self.mo_coeffs[0], self.mo_coeffs[0], self.mo_coeffs[0]], compact=False)
+		#eri_aaaa = eri_aaaa.reshape(norb_alpha, norb_alpha, norb_alpha, norb_alpha)
 
-		# i,j -> occupied orbitals 
-		# a,b -> empty orbitals in active space
+		# --- (beta beta | beta beta) integrals ---
+		eri_bbbb = pyscf.ao2mo.kernel(self.eri_4fold_ao, [self.mo_coeffs[1], self.mo_coeffs[1], self.mo_coeffs[1], self.mo_coeffs[1]], compact=False)
+		#eri_bbbb = eri_bbbb.reshape(norb_beta, norb_beta, norb_beta, norb_beta)
 
-		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
+		# --- (alpha alpha | beta beta) integrals ---
+		# These are the (ij|kl) where i,j are alpha, k,l are beta
+		eri_aabb = pyscf.ao2mo.kernel(self.eri_4fold_ao, [self.mo_coeffs[0], self.mo_coeffs[0], self.mo_coeffs[1], self.mo_coeffs[1]], compact=False)
+		#eri_aabb = eri_aabb.reshape(norb_alpha, norb_alpha, norb_beta, norb_beta)
+
+		# --- (beta beta | alpha alpha) integrals ---
+		eri_bbaa = pyscf.ao2mo.kernel(self.eri_4fold_ao, [self.mo_coeffs[1], self.mo_coeffs[1], self.mo_coeffs[0], self.mo_coeffs[0]], compact=False)
+		#eri_bbaa = eri_bbaa.reshape(norb_beta, norb_beta, norb_alpha, norb_alpha)
+
+		norb_total = norb_alpha + norb_beta
+		#eri_spin = np.zeros((norb_total, norb_total, norb_total, norb_total))
+
+		#https://pyscf.org/_modules/pyscf/cc/addons.html#spatial2spin
+		eri_spin = spatial2spin([eri_aaaa, eri_aabb, eri_bbbb], orbspin=None)
+
+		MP1_amplitudes = np.zeros((norb_total, norb_total, norb_total, norb_total))
 
 		E_corr = 0
+		for I in self.active_occ_indices:
+			for J in self.active_occ_indices:
+				if I > J:
+					for A in self.active_inocc_indices:
+						for B in self.active_inocc_indices:
+							if A > B:
+								#MP2 correlation energy for restricted orbitals: 
+								E_corr += -1.0*((eri_spin[A,I,B,J] - eri_spin[A,J,B,I])**2 
+									/ (self.orbital_energies[A] + self.orbital_energies[B] - self.orbital_energies[I] - self.orbital_energies[J]) )
 
-		# MP2 in spin-orbital basis, Eq. 14.2.53 in Molecular electronic-structure theory book				
-		if spin_orbital_basis:
-			eri_4fold_spin_mo = spatial2spin(eri_4fold_mo, orbspin=None)
-			t1_tensor = np.zeros((2*self.n_orbs,2*self.n_orbs,2*self.n_orbs,2*self.n_orbs))
-			eigval_spin_mo = []
-			for i in eigval:
-				for rep in range(2):
-					eigval_spin_mo.append(float(i))
-
-			for I in self.active_spin_occ_indices :
-				for J in self.active_spin_occ_indices :
-					if I > J:
-						for A in self.active_spin_inocc_indices:
-							for B in self.active_spin_inocc_indices:
-								if A > B:
-									#MP2 correlation energy for restricted orbitals: 
-									E_corr += -1.0*((eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I])**2 
-										/ (eigval_spin_mo[A] + eigval_spin_mo[B] - eigval_spin_mo[I] - eigval_spin_mo[J]) )
-
-									#MP1 amplitudes:
-									t1 =  -1.0*( (eri_4fold_spin_mo[A,I,B,J] - eri_4fold_spin_mo[A,J,B,I]) / (eigval_spin_mo[A] + eigval_spin_mo[B] - eigval_spin_mo[I] - eigval_spin_mo[J]) )
-									t1_tensor[A,I,B,J] = t1
-									#print(t1)
-
+								#MP1 amplitudes:
+								t1 =  -1.0*( (eri_spin[A,I,B,J] - eri_spin[A,J,B,I]) / (self.orbital_energies[A] + self.orbital_energies[B] - self.orbital_energies[I] - self.orbital_energies[J]) )
+								MP1_amplitudes[A,I,B,J] = t1
 		
 
-		# MP2 in spatial orbital basis, Equation 14.4.56 in Molecular electronic-structure theory book
-		if spin_orbital_basis is False:
-			t1_tensor = np.zeros((self.n_orbs,self.n_orbs,self.n_orbs,self.n_orbs))
-			for i in range(int(self.nelec/2)):
-				for j in range(int(self.nelec/2)):
-					for a in range(int(self.nelec/2),self.n_orbs):
-						for b in range(int(self.nelec/2),self.n_orbs):
-							#print("i,j = ",i,j)
-							#print("a,b = ",a,b, "\n")
-
-							#MP2 correlation energy for restricted closed-shell: 
-							E_corr += -1.0*(eri_4fold_mo[a,i,b,j]*(2*eri_4fold_mo[i,a,j,b] - eri_4fold_mo[i,b,j,a]) / 
-								(eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
-
-							#MP1 amplitudes:
-							t1 =  -1.0*(eri_4fold_mo[a,i,b,j] / (eigval[a] + eigval[b] - eigval[i] - eigval[j]) )
-							t1_tensor[a,i,b,j] = t1
-							#print(t1)
-
-
-		E_MP2 = E_rhf + E_corr
-
-		MP2 = self.rhf.MP2().run()
+		MP2 = self.uhf.MP2().run()
 		assert np.abs(E_corr - MP2.e_corr) < 1e-6, "np.abs(E_corr - self.rhf.MP2().run().e_corr) < 1e-6"  
-		assert np.abs(E_MP2 - MP2.e_tot) < 1e-6, "np.abs(E_MP2 - MP2.e_tot) < 1e-6"  
-
-		return E_MP2, t1_tensor 
+		return E_corr, MP1_amplitudes
 
 	
-	def orbital_rotation(self, mo_coeffs):
+	def orbital_optimization(self):
 
 		"""
 		First- and second-order derivatives of the second-order Hylleraas functional
 		Equations 11a and 11b in https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
 		"""
 
+		E_corr, MP1_amplitudes = self.MP2_energy()
+
+		norb_alpha = self.mo_coeffs[0].shape[1]
+		norb_beta = self.mo_coeffs[1].shape[1]
+		
+		norb_total = norb_alpha + norb_beta
+
 		#Gradient
-		G = np.zeros((self.n_orbs, self.n_orbs))
+		G = np.zeros((norb_total, norb_total))
+		def gradient(E: int, A: int) -> float:
+			for I in self.active_occ_indices:
+				for J in self.active_occ_indices:
+					if I > J:
+						for B in self.active_inactive_indices:
+							if E > B:
+								pass
+								
+
+
+
 
 		return NotImplementedError
 
@@ -196,8 +212,9 @@ mol = pyscf.M(atom=atom, basis=basis, unit=unit)
 rhf = pyscf.scf.RHF(mol).run()
 mo_coeff = rhf.mo_coeff 
 
-run_OVOS = OVOS(mol=mol, num_active_orbs=6)
-run_OVOS.MP2_energy(mo_coeffs = mo_coeff, E_rhf = rhf.e_tot)
+run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=8)
+#run_OVOS.MP2_energy()
+run_OVOS.orbital_optimization()
 
 
 
