@@ -3,17 +3,14 @@ OVOS class
 
 The OVOS algorithm minimizes the second-order correlation energy (MP2)
 using orbital rotations.
-
-Implementation based on:
-https://pubs.aip.org/aip/jcp/article/86/11/6314/93345
 """
 
-from typing import Tuple, List
+from typing import Tuple
 
 import numpy as np
 import scipy
 import pyscf
-from pyscf.cc.addons import spatial2spin
+from pyscf.cc.addons import spatial2spin, spin2spatial
 
 
 
@@ -31,9 +28,11 @@ class OVOS:
         PySCF molecule object.
     num_opt_virtual_orbs : int
         Number of optimized virtual spin orbitals.
+    init_orbs : str, 
+        Initial orbitals.
     """
 
-	def __init__(self, mol: pyscf.gto.Mole, num_opt_virtual_orbs: int, init_orbs = "UHF") -> None:
+	def __init__(self, mol: pyscf.gto.Mole, num_opt_virtual_orbs: int, init_orbs: str = "UHF") -> None:
 		self.mol = mol
 		self.num_opt_virtual_orbs = num_opt_virtual_orbs
 		self.init_orbs = init_orbs
@@ -72,11 +71,13 @@ class OVOS:
 		#print(self.active_inocc_indices)
 		#print(int(self.num_opt_virtual_orbs+self.nelec))
 
+		print()
 		print("#### Active and inactive spaces ####")
-		print("Total number of spin orbitals: ", self.tot_num_spin_orbs)
-		print("Active occupied spin orbitals: ", self.active_occ_indices)
-		print("Active unoccupied spin orbitals: ", self.active_inocc_indices)
-		print("Inactive unoccupied spin orbitals: ", self.inactive_indices)
+		print("Total number of spin-orbitals: ", self.tot_num_spin_orbs)
+		print("Active occupied spin-orbitals: ", self.active_occ_indices)
+		print("Active unoccupied spin-orbitals: ", self.active_inocc_indices)
+		print("Inactive unoccupied spin-orbitals: ", self.inactive_indices)
+		print()
 
 		# Also print number of orbital coefficients, R_EA
 
@@ -86,8 +87,19 @@ class OVOS:
 	def MP2_energy(self, mo_coeffs) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
      
 		"""
-		MP2 energy for unrestricted orbitals 
-		"""
+		MP2 correlation energy for unrestricted orbitals 
+
+        Returns
+        -------
+        E_corr : float
+            MP2 correlation energy.
+        t1_amplitudes : ndarray
+            First-order MP amplitudes.
+        eri_spin : ndarray
+            Spin-orbital two-electron integrals.
+        Fmo_spin : ndarray
+            Spin-orbital Fock matrix.
+        """
 
 		norb_alpha = mo_coeffs[0].shape[1]
 		norb_beta = mo_coeffs[1].shape[1]
@@ -132,7 +144,7 @@ class OVOS:
 		norb_total = norb_alpha + norb_beta
 		#eri_spin = np.zeros((norb_total, norb_total, norb_total, norb_total))
 
-		#https://pyscf.org/_modules/pyscf/cc/addons.html#spatial2spin
+		#See https://pyscf.org/_modules/pyscf/cc/addons.html#spatial2spin
 		eri_spin = spatial2spin([eri_aaaa, eri_aabb, eri_bbbb], orbspin=None)
 		Fmo_spin = spatial2spin([Fmo[0], Fmo[1]], orbspin=None)
 
@@ -155,7 +167,7 @@ class OVOS:
 		
 		
 	
-		def t1(I,J,A,B):
+		def t1(I,J,A,B) -> float:
 			#MP1 amplitudes:
 			t1 = -1.0*( (eri_spin[A,I,B,J] - eri_spin[A,J,B,I]) 
 			/ (orbital_energies[A] + orbital_energies[B] 
@@ -217,7 +229,7 @@ class OVOS:
 		norb_alpha = mo_coeffs[0].shape[1]
 		norb_beta = mo_coeffs[1].shape[1]
 
-		def second_order_density_matrix(A:int, B:int) -> float:
+		def second_order_density_matrix_element(A:int, B:int) -> float:
 			#Equation 13
 			D = 0
 			for I in self.active_occ_indices:
@@ -239,28 +251,101 @@ class OVOS:
 
 			second_term = 0
 			for B in self.active_inocc_indices:
-				second_term += 2.0*second_order_density_matrix(A=A, B=B)*Fmo_spin[E,B]
+				second_term += 2.0*second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,B]
 
-			G_EA = first_term + second_term
-
-			return G_EA
+			return first_term + second_term
 
 		
+		def hessian(E: int, A: int, F: int, B: int) -> float:
+			#Equation 12b
+			first_term = 0
+			for I in self.active_occ_indices:
+				for J in self.active_occ_indices:
+					if I > J:
+						first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,F,J] - eri_spin[E,J,F,I])
+
+			second_term = 0
+			for I in self.active_occ_indices:
+				for J in self.active_occ_indices:
+					if I > J:
+						for C in self.active_inocc_indices:
+							if E==F:
+								second_term +=-1.0*(MP1_amplitudes[A,I,B,J]*(eri_spin[B,I,C,J] - eri_spin[B,J,C,I]) 
+									+ MP1_amplitudes[C,I,B,J]*(eri_spin[C,I,A,J] - eri_spin[C,J,A,I])
+									+ second_order_density_matrix_element(A=A, B=B)*(Fmo_spin[A,A] - Fmo_spin[B,B])
+									- second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,F])
+
+							second_term += second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,F]
+
+			return first_term + second_term
+
+
+
+		# build the matrices (gradient and Hessian)
 		idx = 0
 		G = np.zeros((len(self.active_inocc_indices)*len(self.inactive_indices)))
-		for idx2, E in enumerate(self.inactive_indices):
-			for idx1, A in enumerate(self.active_inocc_indices):
+		for E in self.inactive_indices:
+			for A in self.active_inocc_indices:
+				G[idx] = gradient(E,A)
 				idx += 1
-				print(idx, ":", idx2, idx1)
-				#print()
-				#print(gradient(E,A))
-				G[idx-1] = gradient(E,A)
+
+		H = np.zeros((len(G),len(G)))
+		idx1 = 0
+		idx2 = 0
+		for E in self.inactive_indices:
+			for A in self.active_inocc_indices:
+				for F in self.inactive_indices:
+					for B in self.active_inocc_indices:
+					
+						if idx2 > len(H)-1:
+							pass
+						elif idx2 < len(H):
+							#print("idx1=",idx1, "idx2=", idx2)
+							H[idx1,idx2] = hessian(E, A, F, B)
+							idx2 += 1
+							idx2 = idx2 % len(H) 
+				
+				idx1 += 1
+			
+		R = -1.0*G@np.linalg.inv(H)
+		
+		# build rotation matrix
+		idx = 0
+		R_matrix = np.zeros((len(G),len(G)))
+		for i in range(len(self.inactive_indices)):
+			for j in range(len(self.active_inocc_indices)):
+				#print(i,j, R[j])
+				R_matrix[i,j+len(self.active_inocc_indices)] = -1.0*R[idx]
+				R_matrix[j+len(self.active_inocc_indices),i] = -1.0*R_matrix[i,j+len(self.active_inocc_indices)]
+
+				idx += 1
+
+		#import scipy
+		#print(scipy.linalg.expm(R_matrix)@scipy.linalg.expm(R_matrix).T)
+		U = scipy.linalg.expm(R_matrix)
+
+		
+		mo_coeffs = spatial2spin([mo_coeffs[0], mo_coeffs[1]], orbspin=None)
+		mo_coeffs_spin = mo_coeffs@U
+
+
+	
+
+
+
+
+		
+
+				
+
+
+
+
 
 		
 		
 
 
-		
 
 				
 
@@ -297,9 +382,3 @@ mo_coeff = uhf.mo_coeff
 run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=6)
 #run_OVOS.MP2_energy(mo_coeff)
 run_OVOS.orbital_optimization(mo_coeff)
-
-
-
-
-
-
