@@ -137,10 +137,6 @@ class OVOS:
 		eri_aabb = pyscf.ao2mo.kernel(self.eri_4fold_ao, [mo_coeffs[0], mo_coeffs[0], mo_coeffs[1], mo_coeffs[1]], compact=False)
 		#eri_aabb = eri_aabb.reshape(norb_alpha, norb_alpha, norb_beta, norb_beta)
 
-		# (beta beta | alpha alpha) integrals
-		eri_bbaa = pyscf.ao2mo.kernel(self.eri_4fold_ao, [mo_coeffs[1], mo_coeffs[1], mo_coeffs[0], mo_coeffs[0]], compact=False)
-		#eri_bbaa = eri_bbaa.reshape(norb_beta, norb_beta, norb_alpha, norb_alpha)
-
 		norb_total = norb_alpha + norb_beta
 		#eri_spin = np.zeros((norb_total, norb_total, norb_total, norb_total))
 
@@ -304,7 +300,7 @@ class OVOS:
 							H[idx1,idx2] = hessian(E, A, F, B)
 							idx2 += 1
 							idx2 = idx2 % len(H) 
-				
+				 
 				idx1 += 1
 			
 		R = -1.0*G@np.linalg.inv(H)
@@ -328,38 +324,17 @@ class OVOS:
 		mo_coeffs = spatial2spin([mo_coeffs[0], mo_coeffs[1]], orbspin=None)
 		mo_coeffs_spin = mo_coeffs@U
 
+		#mo_coeffs_spin (12,12) --> mo_coeffs_alpha (6,6), mo_coeffs_beta (6,6)
+		# a,b,a,b,a,b .... (12,12) --> (aaaaa, bbbbb) 2*(6,6)
 
-	
-
-
-
-
-		
-
-				
-
-
-
-
-
-		
-		
-
-
-
-				
 
 		return NotImplementedError
 
 
 
 	
-	def run_ovos(self,  mo_coeffs) -> float:
+	def run_ovos(self,  mo_coeffs):
 
-		# Two-electron integrals in MO basis
-		eri_4fold_mo = pyscf.ao2mo.incore.full(self.eri_4fold_ao, mo_coeffs)
-
-		J = 0
 
 		raise NotImplementedError
 		
