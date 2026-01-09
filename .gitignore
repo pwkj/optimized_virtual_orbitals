@@ -1,6 +1,8 @@
 # Local development folders
 local/
+branch/
 backup/
+images/
 
 # Python
 __pycache__/
@@ -18,6 +20,11 @@ env/
 # IDE
 .vscode/
 .idea/
+.github/
 *.swp
 *.swo
 *~
+
+# uv
+uv.lock
+pyproject.toml
