@@ -11,6 +11,7 @@ import numpy as np
 import scipy
 import pyscf
 from pyscf.cc.addons import spatial2spin, spin2spatial
+from pyscf.scf.addons import convert_to_ghf
 
 
 
@@ -20,7 +21,7 @@ class OVOS:
 	The OVOS algorithm minimizes the second-order correlation energy (MP2) using orbital rotations. 
 
 	Implemenation is based on:
-	https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
+	[L. Adamowicz & R. J. Bartlett (1987)](https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level)
 
     Parameters
     ----------
@@ -59,6 +60,10 @@ class OVOS:
 		
 		# Number of electrons
 		self.nelec = self.mol.nelec[0] + self.mol.nelec[1]
+
+		# build spin orbital coefficients
+			# [0,1,0,1,...] for alpha and beta spin orbitals
+		self.orbspin = np.array([0,1]*self.tot_num_spin_orbs)
 
 		# Build index lists of active and inactive spaces
 		#I,J indices -> occupied spin orbitals
@@ -213,30 +218,43 @@ class OVOS:
 		return J_2, MP1_amplitudes, eri_spin, Fmo_spin
 
 	
-	def orbital_optimization(self, mo_coeffs):
+	def orbital_optimization(self, mo_coeffs, MP1_amplitudes, eri_spin, Fmo_spin) -> np.ndarray:
 
 		"""
+		Step (v-viii) of the OVOS algorithm: Orbital optimization via orbital rotations.
+		
+		- Compute gradient, first-order derivatives of the second-order Hylleraas functional, Equation 11a [L. Adamowicz & R. J. Bartlett (1987)]
+		
+		- Compute Hessiansecond-order derivatives of the second-order Hylleraas functional
+		Equation 11b in [L. Adamowicz & R. J. Bartlett (1987)]
+
+		- Use the Newton-Raphson method to minimize the second-order Hylleraas functional, Equations 14 in [L. Adamowicz & R. J. Bartlett (1987)]
+
+		- Construct the unitary orbital rotation matrix U = exp(R), Equation 15 in [L. Adamowicz & R. J. Bartlett (1987)]
+
 		First- and second-order derivatives of the second-order Hylleraas functional
 		Equations 11a and 11b in https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
 		"""
 
-		E_corr, MP1_amplitudes, eri_spin, Fmo_spin = self.MP2_energy(mo_coeffs = mo_coeffs)
+		# Step (v): Compute the gradient and Hessian of the second-order Hylleraas functional
 
-		norb_alpha = mo_coeffs[0].shape[1]
-		norb_beta = mo_coeffs[1].shape[1]
+		# Optimization A: Pre-compute second-order density matrix elements D_AB (Equation 13)
+		# This avoids recalculating the same D_AB values multiple times in hessian()
+		n_active_inocc = len(self.active_inocc_indices)
+		D_AB_cache = np.zeros((n_active_inocc, n_active_inocc))
+		
+		for idx_A, A in enumerate(self.active_inocc_indices):
+			for idx_B, B in enumerate(self.active_inocc_indices):
+				D = 0.0
+				for I in self.active_occ_indices:
+					for J in self.active_occ_indices:
+						if I > J:
+							for C in self.active_inocc_indices:
+								D += MP1_amplitudes[A,I,C,J] * MP1_amplitudes[B,I,C,J]
+				D_AB_cache[idx_A, idx_B] = D
 
-		def second_order_density_matrix_element(A:int, B:int) -> float:
-			#Equation 13
-			D = 0
-			for I in self.active_occ_indices:
-				for J in self.active_occ_indices:
-					if I > J:
-						for C in self.active_inocc_indices:
-							D += MP1_amplitudes[A,I,C,J]*MP1_amplitudes[B,I,C,J]
-			return D
 
-
-		def gradient(E: int, A: int) -> float:
+		def gradient(E: int, A: int, idx_A: int) -> float:
 			#Equation 12a
 			first_term = 0
 			for I in self.active_occ_indices:
@@ -246,13 +264,13 @@ class OVOS:
 							first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,B,J] - eri_spin[E,J,B,I])
 
 			second_term = 0
-			for B in self.active_inocc_indices:
-				second_term += 2.0*second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,B]
+			for idx_B, B in enumerate(self.active_inocc_indices):
+				second_term += 2.0*D_AB_cache[idx_A, idx_B]*Fmo_spin[E,B]
 
 			return first_term + second_term
 
 		
-		def hessian(E: int, A: int, F: int, B: int) -> float:
+		def hessian(E: int, A: int, F: int, B: int, idx_A: int, idx_B: int) -> float:
 			#Equation 12b
 			first_term = 0
 			for I in self.active_occ_indices:
@@ -261,6 +279,8 @@ class OVOS:
 						first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,F,J] - eri_spin[E,J,F,I])
 
 			second_term = 0
+			D_AB = D_AB_cache[idx_A, idx_B]
+			
 			for I in self.active_occ_indices:
 				for J in self.active_occ_indices:
 					if I > J:
@@ -268,75 +288,120 @@ class OVOS:
 							if E==F:
 								second_term +=-1.0*(MP1_amplitudes[A,I,B,J]*(eri_spin[B,I,C,J] - eri_spin[B,J,C,I]) 
 									+ MP1_amplitudes[C,I,B,J]*(eri_spin[C,I,A,J] - eri_spin[C,J,A,I])
-									+ second_order_density_matrix_element(A=A, B=B)*(Fmo_spin[A,A] - Fmo_spin[B,B])
-									- second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,F])
+									+ D_AB*(Fmo_spin[A,A] - Fmo_spin[B,B])
+									- D_AB*Fmo_spin[E,F])
 
-							second_term += second_order_density_matrix_element(A=A, B=B)*Fmo_spin[E,F]
+							second_term += D_AB*Fmo_spin[E,F]
 
 			return first_term + second_term
-
 
 
 		# build the matrices (gradient and Hessian)
 		idx = 0
 		G = np.zeros((len(self.active_inocc_indices)*len(self.inactive_indices)))
 		for E in self.inactive_indices:
-			for A in self.active_inocc_indices:
-				G[idx] = gradient(E,A)
+			for idx_A, A in enumerate(self.active_inocc_indices):
+				G[idx] = gradient(E, A, idx_A)
 				idx += 1
 
 		H = np.zeros((len(G),len(G)))
 		idx1 = 0
 		idx2 = 0
 		for E in self.inactive_indices:
-			for A in self.active_inocc_indices:
+			for idx_A, A in enumerate(self.active_inocc_indices):
 				for F in self.inactive_indices:
-					for B in self.active_inocc_indices:
+					for idx_B, B in enumerate(self.active_inocc_indices):
 					
 						if idx2 > len(H)-1:
 							pass
 						elif idx2 < len(H):
-							#print("idx1=",idx1, "idx2=", idx2)
-							H[idx1,idx2] = hessian(E, A, F, B)
+							H[idx1,idx2] = hessian(E, A, F, B, idx_A, idx_B)
 							idx2 += 1
 							idx2 = idx2 % len(H) 
 				 
 				idx1 += 1
 			
+		# Step (vi): Use the Newton-Raphson method to minimize the second-order Hylleraas functional
+
+		# solve for rotation parameters
+			# equation 14
 		R = -1.0*G@np.linalg.inv(H)
-		
+
 		# build rotation matrix
 		idx = 0
 		R_matrix = np.zeros((len(G),len(G)))
 		for i in range(len(self.inactive_indices)):
 			for j in range(len(self.active_inocc_indices)):
-				#print(i,j, R[j])
 				R_matrix[i,j+len(self.active_inocc_indices)] = -1.0*R[idx]
 				R_matrix[j+len(self.active_inocc_indices),i] = -1.0*R_matrix[i,j+len(self.active_inocc_indices)]
 
 				idx += 1
 
-		#import scipy
-		#print(scipy.linalg.expm(R_matrix)@scipy.linalg.expm(R_matrix).T)
+		# Check that R_matrix is anti-symmetric
+		assert np.allclose(R_matrix + R_matrix.T, 0), "R_matrix is not anti-symmetric"
+
+		# Step (vii): Construct the unitary orbital rotation matrix U = exp(R)
+
 		U = scipy.linalg.expm(R_matrix)
 
+		# Check that U is orthogonal
+		assert np.allclose(U@U.T, np.eye(len(U))), "U is not orthogonal"
 		
-		mo_coeffs = spatial2spin([mo_coeffs[0], mo_coeffs[1]], orbspin=None)
-		mo_coeffs_spin = mo_coeffs@U
+		# Step (viii): Rotate the orbitals
 
-		#mo_coeffs_spin (12,12) --> mo_coeffs_alpha (6,6), mo_coeffs_beta (6,6)
-		# a,b,a,b,a,b .... (12,12) --> (aaaaa, bbbbb) 2*(6,6)
-
-
-		return NotImplementedError
-
+		# rotate orbitals, mo_coeffs (6,6), (6,6) --> (12,12)
+			# convert to spin orbital basis
+		mo_coeffs_spin = spatial2spin([mo_coeffs[0], mo_coeffs[1]],orbspin=self.orbspin)
+			# rotate
+		mo_coeffs_spin_new = mo_coeffs_spin@U
+			# convert back to spatial orbital basis
+		mo_coeffs_rot = spin2spatial(mo_coeffs_spin_new, orbspin=self.orbspin)
+		
+		return mo_coeffs_rot
 
 
 	
 	def run_ovos(self,  mo_coeffs):
+		"""
+		Run the OVOS algorithm.
+		"""
 
+		converged = False
+		max_iter = 100000
+		iter = 0
 
-		raise NotImplementedError
+		while not converged and iter < max_iter:
+			iter += 1
+			print("#### OVOS Iteration ", iter, " ####")
+			
+			E_corr, MP1_amplitudes, eri_spin, Fmo_spin = self.MP2_energy(mo_coeffs = mo_coeffs)
+			print("MP2 correlation energy: ", E_corr)
+
+			# Step (ix): check convergence
+			# convergence criterion: change in correlation energy < 1e-6 Hartree
+			if iter > 1:
+				if np.abs(E_corr - lst_E_corr[-1]) < 1e-6:
+					converged = True
+					print("OVOS converged in ", iter, " iterations.")
+				else:
+					lst_E_corr.append(E_corr)
+			else:
+				lst_E_corr = []
+				lst_E_corr.append(E_corr)
+
+			# If MP2 goes positive, stop the optimization
+			if E_corr > 0:
+				print("Warning: MP2 correlation energy is positive. Stopping OVOS optimization.")
+				break
+
+			mo_coeffs = self.orbital_optimization(mo_coeffs, MP1_amplitudes=MP1_amplitudes, eri_spin=eri_spin, Fmo_spin=Fmo_spin)
+
+		if not converged:
+			print("OVOS did not converge in ", max_iter, " iterations.")
+
+		return lst_E_corr, iter
+	
+	
 		
 
 
@@ -349,11 +414,92 @@ basis = "STO-3G"
 #basis = "6-31G"
 unit="angstrom"
 mol = pyscf.M(atom=atom, basis=basis, unit=unit)
-
-
+	
 uhf = pyscf.scf.UHF(mol).run()
 mo_coeff = uhf.mo_coeff 
+# run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=6)
+# run_OVOS.run_ovos(mo_coeff)
 
-run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=6)
-#run_OVOS.MP2_energy(mo_coeff)
-run_OVOS.orbital_optimization(mo_coeff)
+# Calculate the full space MP2 correlation energy for reference
+mp2_full = OVOS(mol=mol, num_opt_virtual_orbs=8).MP2_energy(mo_coeffs=mo_coeff)[0]
+print("Full space MP2 correlation energy: ", mp2_full)
+print("")	
+
+"""
+Run OVOS algorithm for N cycles and store MP2 correlation energy convergence data.
+"""
+
+import time
+
+lst_E_corr_cycle = []
+iter_conv_cycle = []
+
+cycle_max = 25 # N = 100
+
+start_time = time.time()
+
+for cycle in range(cycle_max):
+	print("")
+	print("#### OVOS Cycle ", cycle+1, " ####")
+
+	# You can change the number of optimized virtual orbitals here
+	num_opt_virtual_orbs = 6
+	run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=num_opt_virtual_orbs)
+
+	lst_E_corr, iter_conv = run_OVOS.run_ovos(mo_coeff)
+	
+	# If the last cycle's correlation energy converges to a positive value, skip storing the data
+	if lst_E_corr[-1] > 0:
+		print("Warning: OVOS converged to a positive MP2 correlation energy. Skipping data storage for this cycle.")
+		print("")
+	else:
+		lst_E_corr_cycle.append(lst_E_corr)
+		iter_conv_cycle.append(iter_conv)
+
+elapsed_time = time.time() - start_time
+minutes = elapsed_time / 60
+print(f"Cycle {len(lst_E_corr_cycle)} completed in {minutes:.2f} min. ({elapsed_time:.2f} sec.)")
+print("")
+
+# Times taken for full cycles:
+# cycle_max = 100 --> 73.63 minutes
+# cycle_max = 100 --> ... minutes (With optimizations, ofc. randomness affects times)
+
+"""
+Time profiling
+"""
+time_profile = False
+if time_profile == True and cycle_max == 1:
+	import cProfile
+	import pstats
+
+	opt = "opt_B"
+
+	cProfile.run('OVOS(mol=mol, num_opt_virtual_orbs=6).run_ovos(mo_coeff)', 'branch/profil/profiling_results_'+opt+'.prof')
+
+	# Print the profiling results
+	with open('branch/profil/profiling_results_'+opt+'.txt', 'w') as f:
+		stats = pstats.Stats('branch/profil/profiling_results_'+opt+'.prof', stream=f)
+		stats.sort_stats('cumulative')  # Sort by cumulative time
+		stats.print_stats()
+
+"""
+Save data to JSON files
+"""
+save_data = False
+if save_data == True:
+	import json
+
+	cycle_max_str = str(cycle_max)
+
+	# Save iteration convergence data
+	with open("branch/data/iter_conv_cycle_"+cycle_max_str+".json", "w") as f:
+		json.dump(iter_conv_cycle, f, indent=2)
+
+	# Save MP2 correlation energy convergence data
+	with open("branch/data/lst_E_corr_cycle_"+cycle_max_str+".json", "w") as f:
+		json.dump(lst_E_corr_cycle, f, indent=2)
+
+	print("Data saved to branch/data/iter_conv_cycle.json and branch/data/lst_E_corr_cycle.json")
+
+
