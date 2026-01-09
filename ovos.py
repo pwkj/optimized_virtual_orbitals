@@ -76,6 +76,19 @@ class OVOS:
 		#print(self.active_inocc_indices)
 		#print(int(self.num_opt_virtual_orbs+self.nelec))
 
+		# Precompute valid I>J, A>B, C>D combinations to avoid redundant calculations
+			# Not implemented yet!
+		self.active_occ_indices_valid = [(I, J) for I in self.active_occ_indices for J in self.active_occ_indices if I > J]
+		self.active_inocc_indices_valid = [(A, B) for A in self.active_inocc_indices for B in self.active_inocc_indices if A > B]
+		self.inactive_indices_valid = [(E, F) for E in self.inactive_indices for F in self.inactive_indices if E > F]
+			# This lets us transform nested loops like:
+			# for A in self.active_inocc_indices:
+			# 	for B in self.active_inocc_indices:
+			# 		if A > B:
+			# into:
+			# for (A, B) in self.active_inocc_indices_valid:
+
+		# Print information about the spaces
 		print()
 		print("#### Active and inactive spaces ####")
 		print("Total number of spin-orbitals: ", self.tot_num_spin_orbs)
@@ -90,21 +103,20 @@ class OVOS:
 
 
 	def MP2_energy(self, mo_coeffs) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: 
-     
 		"""
 		MP2 correlation energy for unrestricted orbitals 
 
-        Returns
-        -------
-        E_corr : float
-            MP2 correlation energy.
-        t1_amplitudes : ndarray
-            First-order MP amplitudes.
-        eri_spin : ndarray
-            Spin-orbital two-electron integrals.
-        Fmo_spin : ndarray
-            Spin-orbital Fock matrix.
-        """
+		Returns
+		-------
+		E_corr : float
+			MP2 correlation energy.
+		t1_amplitudes : ndarray
+			First-order MP amplitudes.
+		eri_spin : ndarray
+			Spin-orbital two-electron integrals.
+		Fmo_spin : ndarray
+			Spin-orbital Fock matrix.
+		"""
 
 		norb_alpha = mo_coeffs[0].shape[1]
 		norb_beta = mo_coeffs[1].shape[1]
@@ -113,7 +125,7 @@ class OVOS:
 		Fmo_a = mo_coeffs[0].T @ self.Fao[0] @ mo_coeffs[0]
 		Fmo_b = mo_coeffs[1].T @ self.Fao[1] @ mo_coeffs[1]
 		Fmo = (Fmo_a, Fmo_b)
-		
+
 		# Orbital energies (spin-orbital representation)
 		eigval_a, eigvec_a = scipy.linalg.eig(Fmo_a)
 		eigval_b, eigvec_b = scipy.linalg.eig(Fmo_b)
@@ -165,9 +177,9 @@ class OVOS:
 		# 						#MP1 amplitudes:
 		# 						t1 =  -1.0*( (eri_spin[A,I,B,J] - eri_spin[A,J,B,I]) / (orbital_energies[A] + orbital_energies[B] - orbital_energies[I] - orbital_energies[J]) )
 		# 						MP1_amplitudes[A,I,B,J] = t1
-		
-		
-	
+
+
+
 		def t1(I,J,A,B) -> float:
 			#MP1 amplitudes:
 			t1 = -1.0*( (eri_spin[A,I,B,J] - eri_spin[A,J,B,I]) 
@@ -175,48 +187,38 @@ class OVOS:
 			- orbital_energies[I] - orbital_energies[J]) )
 			return t1
 
-
 		J_2 = 0
-		for I in self.active_occ_indices:
-			for J in self.active_occ_indices:
-				if I > J:
-					first_term = 0
-					for A in self.active_inocc_indices:
-						for B in self.active_inocc_indices:
-							if A > B:
-								for C in self.active_inocc_indices:
-									for D in self.active_inocc_indices:
-										if C > D:
-								
-											t_abij = t1(I=I,J=J,A=A,B=B)
-											t_cdij = t1(I=I,J=J,A=C,B=D)
+		for (I, J) in self.active_occ_indices_valid:
+			first_term = 0
+			for (A, B) in self.active_inocc_indices_valid:
+				for (C, D) in self.active_inocc_indices_valid:
 
-											if B==D:
-												first_term += t_abij*t_cdij*Fmo_spin[A,C]
-											if A==C:
-												first_term += t_abij*t_cdij*Fmo_spin[B,D]
-											if B==C:
-												first_term += -1.0*t_abij*t_cdij*Fmo_spin[A,D]
-											if A==D:
-												first_term += -1.0*t_abij*t_cdij*Fmo_spin[B,C]
-											if A==C and B==D:
-												first_term += -1.0*t_abij*t_cdij*(orbital_energies[I] + orbital_energies[J])
-											if A==D and B==C:
-												first_term += t_abij*t_cdij*(orbital_energies[I] + orbital_energies[J])
+					t_abij = t1(I=I,J=J,A=A,B=B)
+					t_cdij = t1(I=I,J=J,A=C,B=D)
 
-					second_term = 0
-					for A in self.active_inocc_indices:
-						for B in self.active_inocc_indices:
-							if A > B:
-								second_term += 2*t1(I=I,J=J,A=A,B=B)*(eri_spin[A,I,B,J] - eri_spin[A,J,B,I])
-								MP1_amplitudes[A,I,B,J] = t1(I=I,J=J,A=A,B=B)
-					
-					J_2 += first_term+second_term
+					if B==D:
+						first_term += t_abij*t_cdij*Fmo_spin[A,C]
+					if A==C:
+						first_term += t_abij*t_cdij*Fmo_spin[B,D]
+					if B==C:
+						first_term += -1.0*t_abij*t_cdij*Fmo_spin[A,D]
+					if A==D:
+						first_term += -1.0*t_abij*t_cdij*Fmo_spin[B,C]
+					if A==C and B==D:
+						first_term += -1.0*t_abij*t_cdij*(orbital_energies[I] + orbital_energies[J])
+					if A==D and B==C:
+						first_term += t_abij*t_cdij*(orbital_energies[I] + orbital_energies[J])
+
+			second_term = 0
+			for (A, B) in self.active_inocc_indices_valid:
+				second_term += 2*t1(I=I,J=J,A=A,B=B)*(eri_spin[A,I,B,J] - eri_spin[A,J,B,I])
+				MP1_amplitudes[A,I,B,J] = t1(I=I,J=J,A=A,B=B)
+			
+			J_2 += first_term+second_term
 
 		#MP2 = self.uhf.MP2().run()
 		#assert np.abs(J_2 - MP2.e_corr) < 1e-6, "|J_2 - E_corr_MP2| < 1e-6 !!!"  
 		return J_2, MP1_amplitudes, eri_spin, Fmo_spin
-
 	
 	def orbital_optimization(self, mo_coeffs, MP1_amplitudes, eri_spin, Fmo_spin) -> np.ndarray:
 
@@ -237,8 +239,8 @@ class OVOS:
 		"""
 
 		# Step (v): Compute the gradient and Hessian of the second-order Hylleraas functional
-
-		# Optimization A: Pre-compute second-order density matrix elements D_AB (Equation 13)
+		
+		# Precompute D_AB values for all A,B in active_inocc_indices		
 		# This avoids recalculating the same D_AB values multiple times in hessian()
 		n_active_inocc = len(self.active_inocc_indices)
 		D_AB_cache = np.zeros((n_active_inocc, n_active_inocc))
@@ -246,22 +248,18 @@ class OVOS:
 		for idx_A, A in enumerate(self.active_inocc_indices):
 			for idx_B, B in enumerate(self.active_inocc_indices):
 				D = 0.0
-				for I in self.active_occ_indices:
-					for J in self.active_occ_indices:
-						if I > J:
-							for C in self.active_inocc_indices:
-								D += MP1_amplitudes[A,I,C,J] * MP1_amplitudes[B,I,C,J]
+				for (I, J) in self.active_occ_indices_valid:
+					for C in self.active_inocc_indices:
+						D += MP1_amplitudes[A,I,C,J] * MP1_amplitudes[B,I,C,J]
 				D_AB_cache[idx_A, idx_B] = D
 
 
 		def gradient(E: int, A: int, idx_A: int) -> float:
 			#Equation 12a
 			first_term = 0
-			for I in self.active_occ_indices:
-				for J in self.active_occ_indices:
-					if I > J:
-						for B in self.active_inocc_indices:
-							first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,B,J] - eri_spin[E,J,B,I])
+			for (I, J) in self.active_occ_indices_valid:
+				for B in self.active_inocc_indices:
+					first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,B,J] - eri_spin[E,J,B,I])
 
 			second_term = 0
 			for idx_B, B in enumerate(self.active_inocc_indices):
@@ -273,25 +271,21 @@ class OVOS:
 		def hessian(E: int, A: int, F: int, B: int, idx_A: int, idx_B: int) -> float:
 			#Equation 12b
 			first_term = 0
-			for I in self.active_occ_indices:
-				for J in self.active_occ_indices:
-					if I > J:
-						first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,F,J] - eri_spin[E,J,F,I])
+			for (I, J) in self.active_occ_indices_valid:
+				first_term += 2.0*MP1_amplitudes[A,I,B,J]*(eri_spin[E,I,F,J] - eri_spin[E,J,F,I])
 
 			second_term = 0
 			D_AB = D_AB_cache[idx_A, idx_B]
 			
-			for I in self.active_occ_indices:
-				for J in self.active_occ_indices:
-					if I > J:
-						for C in self.active_inocc_indices:
-							if E==F:
-								second_term +=-1.0*(MP1_amplitudes[A,I,B,J]*(eri_spin[B,I,C,J] - eri_spin[B,J,C,I]) 
-									+ MP1_amplitudes[C,I,B,J]*(eri_spin[C,I,A,J] - eri_spin[C,J,A,I])
-									+ D_AB*(Fmo_spin[A,A] - Fmo_spin[B,B])
-									- D_AB*Fmo_spin[E,F])
+			for (I, J) in self.active_occ_indices_valid:
+				for C in self.active_inocc_indices:
+					if E==F:
+						second_term +=-1.0*(MP1_amplitudes[A,I,B,J]*(eri_spin[B,I,C,J] - eri_spin[B,J,C,I]) 
+							+ MP1_amplitudes[C,I,B,J]*(eri_spin[C,I,A,J] - eri_spin[C,J,A,I])
+							+ D_AB*(Fmo_spin[A,A] - Fmo_spin[B,B])
+							- D_AB*Fmo_spin[E,F])
 
-							second_term += D_AB*Fmo_spin[E,F]
+					second_term += D_AB*Fmo_spin[E,F]
 
 			return first_term + second_term
 
@@ -304,22 +298,23 @@ class OVOS:
 				G[idx] = gradient(E, A, idx_A)
 				idx += 1
 
-		H = np.zeros((len(G),len(G)))
-		idx1 = 0
-		idx2 = 0
-		for E in self.inactive_indices:
+		H = np.zeros((len(G), len(G)))
+		idx = 0
+		
+		for i_E, E in enumerate(self.inactive_indices):
 			for idx_A, A in enumerate(self.active_inocc_indices):
-				for F in self.inactive_indices:
+				idx1 = i_E * len(self.active_inocc_indices) + idx_A
+				
+				for i_F, F in enumerate(self.inactive_indices):
 					for idx_B, B in enumerate(self.active_inocc_indices):
-					
-						if idx2 > len(H)-1:
-							pass
-						elif idx2 < len(H):
-							H[idx1,idx2] = hessian(E, A, F, B, idx_A, idx_B)
-							idx2 += 1
-							idx2 = idx2 % len(H) 
-				 
-				idx1 += 1
+						idx2 = i_F * len(self.active_inocc_indices) + idx_B
+						
+						# Only compute upper triangle (including diagonal)
+						if idx2 >= idx1:
+							H[idx1, idx2] = hessian(E, A, F, B, idx_A, idx_B)
+		
+		# Mirror to lower triangle (Hessian is symmetric)
+		H = H + H.T - np.diag(np.diag(H))
 			
 		# Step (vi): Use the Newton-Raphson method to minimize the second-order Hylleraas functional
 
@@ -425,6 +420,9 @@ mp2_full = OVOS(mol=mol, num_opt_virtual_orbs=8).MP2_energy(mo_coeffs=mo_coeff)[
 print("Full space MP2 correlation energy: ", mp2_full)
 print("")	
 
+
+
+
 """
 Run OVOS algorithm for N cycles and store MP2 correlation energy convergence data.
 """
@@ -434,11 +432,12 @@ import time
 lst_E_corr_cycle = []
 iter_conv_cycle = []
 
-cycle_max = 25 # N = 100
+cycle_max = 0 # N = 100
+cycle_max_run = cycle_max
 
 start_time = time.time()
 
-for cycle in range(cycle_max):
+for cycle in range(cycle_max_run):
 	print("")
 	print("#### OVOS Cycle ", cycle+1, " ####")
 
@@ -452,6 +451,9 @@ for cycle in range(cycle_max):
 	if lst_E_corr[-1] > 0:
 		print("Warning: OVOS converged to a positive MP2 correlation energy. Skipping data storage for this cycle.")
 		print("")
+
+		# Do a new cycle still keeping the max number of cycles the same
+		cycle_max_run += 1
 	else:
 		lst_E_corr_cycle.append(lst_E_corr)
 		iter_conv_cycle.append(iter_conv)
@@ -462,18 +464,20 @@ print(f"Cycle {len(lst_E_corr_cycle)} completed in {minutes:.2f} min. ({elapsed_
 print("")
 
 # Times taken for full cycles:
-# cycle_max = 100 --> 73.63 minutes
+# cycle_max = 100 --> 73.63 minutes (No optimizations)
 # cycle_max = 100 --> ... minutes (With optimizations, ofc. randomness affects times)
+
+
 
 """
 Time profiling
 """
-time_profile = False
-if time_profile == True and cycle_max == 1:
+time_profile = True
+if time_profile == True and cycle_max == 0:
 	import cProfile
 	import pstats
 
-	opt = "opt_B"
+	opt = "opt_C" # Lable for optimization settings, see Optimization_options.md
 
 	cProfile.run('OVOS(mol=mol, num_opt_virtual_orbs=6).run_ovos(mo_coeff)', 'branch/profil/profiling_results_'+opt+'.prof')
 
@@ -482,6 +486,9 @@ if time_profile == True and cycle_max == 1:
 		stats = pstats.Stats('branch/profil/profiling_results_'+opt+'.prof', stream=f)
 		stats.sort_stats('cumulative')  # Sort by cumulative time
 		stats.print_stats()
+
+
+
 
 """
 Save data to JSON files
