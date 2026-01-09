@@ -1,41 +1,54 @@
 """
 OVOS class
+
+The OVOS algorithm minimizes the second-order correlation energy (MP2)
+using orbital rotations.
 """
 
-from typing import Tuple, List
+from typing import Tuple
 
 import numpy as np
 import scipy
 import pyscf
-from pyscf.cc.addons import spatial2spin
+from pyscf.cc.addons import spatial2spin, spin2spatial
+from pyscf.scf.addons import convert_to_ghf
+
+
 
 
 class OVOS:
 
 	"""
 	Implemenation is based on:
-	https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level
+	[L. Adamowicz & R. J. Bartlett (1987)](https://pubs.aip.org/aip/jcp/article/86/11/6314/93345/Optimized-virtual-orbital-space-for-high-level)
 
     Parameters
     ----------
     mol : pyscf.M
         PySCF molecule object.
-    num_vir_ops : int
-        Number of optimized virtual orbitals.
+    num_opt_virtual_orbs : int
+        Number of optimized virtual spin orbitals.
+    init_orbs : str, 
+        Initial orbitals.
     """
 
-	def __init__(self, mol: pyscf.gto.Mole, num_vir_ops: int) -> None:
+	def __init__(self, mol: pyscf.gto.Mole, num_opt_virtual_orbs: int, init_orbs: str = "UHF") -> None:
 		self.mol = mol
-		self.num_vir_ops = num_vir_ops
+		self.num_opt_virtual_orbs = num_opt_virtual_orbs
+		self.init_orbs = init_orbs
 
-		# Restricted Hartree-Fock calculation
-		self.rhf = pyscf.scf.RHF(mol).run()
-		self.e_rhf = self.rhf.e_tot
+		# Set up unrestricted Hartree-Fock calculation 
+		self.uhf = pyscf.scf.UHF(mol).run()
+		self.e_rhf = self.uhf.e_tot
 		self.h_nuc = mol.energy_nuc()
 
-		# Build fock matrix in AO basis
-		self.F_matrix  = self.rhf.get_fock()
+		if self.init_orbs == "UHF":
+			# MO coefficients (alpha, beta)
+			self.mo_coeffs = self.uhf.mo_coeff
 
+		# Fock matrix in AO basis 
+		self.Fao = self.uhf.get_fock()
+		
 		# Integrals in AO basis
 		self.hcore_ao = mol.intor("int1e_kin") + mol.intor("int1e_nuc")
 		self.overlap = mol.intor('int1e_ovlp')
@@ -215,6 +228,12 @@ class OVOS:
 		float
 			MP2 total energy, E_MP2 = E_RHF + E_corr
 		"""
+		Step (v-viii) of the OVOS algorithm: Orbital optimization via orbital rotations.
+		
+		- Compute gradient, first-order derivatives of the second-order Hylleraas functional, Equation 11a [L. Adamowicz & R. J. Bartlett (1987)]
+		
+		- Compute Hessiansecond-order derivatives of the second-order Hylleraas functional
+		Equation 11b in [L. Adamowicz & R. J. Bartlett (1987)]
 
 		# Transform Fock matrix to MO basis
 		Fmo  = mo_coeffs.T @ self.F_matrix @ mo_coeffs
@@ -288,6 +307,9 @@ class OVOS:
 		return E_MP2, E_corr_tensor
 	
 
+			second_term = 0
+			for idx_B, B in enumerate(self.active_inocc_indices):
+				second_term += 2.0*D_AB_cache[idx_A, idx_B]*Fmo_spin[E,B]
 
 	def _compute_gradient_hessian(self, mo_coeffs, active_virt_indices, inactive_virt_indices, t1_tensor) -> Tuple[np.ndarray, np.ndarray]:
 		"""
@@ -446,8 +468,10 @@ class OVOS:
 			Unitary rotation matrix U
 		"""
 
-		return NotImplementedError
+		# Check that R_matrix is anti-symmetric
+		assert np.allclose(R_matrix + R_matrix.T, 0), "R_matrix is not anti-symmetric"
 
+		# Step (vii): Construct the unitary orbital rotation matrix U = exp(R)
 
 	def _Fock_matrix(self, rotation_unitary) -> Tuple[np.ndarray, np.ndarray]:
 		"""
@@ -560,16 +584,106 @@ basis = "STO-3G"
 #basis = "6-31G"
 unit="angstrom"
 mol = pyscf.M(atom=atom, basis=basis, unit=unit)
+	
+uhf = pyscf.scf.UHF(mol).run()
+mo_coeff = uhf.mo_coeff 
+# run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=6)
+# run_OVOS.run_ovos(mo_coeff)
+
+# Calculate the full space MP2 correlation energy for reference
+mp2_full = OVOS(mol=mol, num_opt_virtual_orbs=8).MP2_energy(mo_coeffs=mo_coeff)[0]
+print("Full space MP2 correlation energy: ", mp2_full)
+print("")	
 
 
-rhf = pyscf.scf.RHF(mol).run()
-mo_coeff = rhf.mo_coeff 
 
 run_OVOS = OVOS(mol=mol, num_vir_ops=3)
 run_OVOS.run_OVOS()
 
+"""
+Run OVOS algorithm for N cycles and store MP2 correlation energy convergence data.
+"""
+
+import time
+
+lst_E_corr_cycle = []
+iter_conv_cycle = []
+
+cycle_max = 0 # N = 100
+cycle_max_run = cycle_max
+
+start_time = time.time()
+
+for cycle in range(cycle_max_run):
+	print("")
+	print("#### OVOS Cycle ", cycle+1, " ####")
+
+	# You can change the number of optimized virtual orbitals here
+	num_opt_virtual_orbs = 6
+	run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=num_opt_virtual_orbs)
+
+	lst_E_corr, iter_conv = run_OVOS.run_ovos(mo_coeff)
+	
+	# If the last cycle's correlation energy converges to a positive value, skip storing the data
+	if lst_E_corr[-1] > 0:
+		print("Warning: OVOS converged to a positive MP2 correlation energy. Skipping data storage for this cycle.")
+		print("")
+
+		# Do a new cycle still keeping the max number of cycles the same
+		cycle_max_run += 1
+	else:
+		lst_E_corr_cycle.append(lst_E_corr)
+		iter_conv_cycle.append(iter_conv)
+
+elapsed_time = time.time() - start_time
+minutes = elapsed_time / 60
+print(f"Cycle {len(lst_E_corr_cycle)} completed in {minutes:.2f} min. ({elapsed_time:.2f} sec.)")
+print("")
+
+# Times taken for full cycles:
+# cycle_max = 100 --> 73.63 minutes (No optimizations)
+# cycle_max = 100 --> ... minutes (With optimizations, ofc. randomness affects times)
 
 
 
+"""
+Time profiling
+"""
+time_profile = True
+if time_profile == True and cycle_max == 0:
+	import cProfile
+	import pstats
+
+	opt = "opt_C" # Lable for optimization settings, see Optimization_options.md
+
+	cProfile.run('OVOS(mol=mol, num_opt_virtual_orbs=6).run_ovos(mo_coeff)', 'branch/profil/profiling_results_'+opt+'.prof')
+
+	# Print the profiling results
+	with open('branch/profil/profiling_results_'+opt+'.txt', 'w') as f:
+		stats = pstats.Stats('branch/profil/profiling_results_'+opt+'.prof', stream=f)
+		stats.sort_stats('cumulative')  # Sort by cumulative time
+		stats.print_stats()
+
+
+
+
+"""
+Save data to JSON files
+"""
+save_data = False
+if save_data == True:
+	import json
+
+	cycle_max_str = str(cycle_max)
+
+	# Save iteration convergence data
+	with open("branch/data/iter_conv_cycle_"+cycle_max_str+".json", "w") as f:
+		json.dump(iter_conv_cycle, f, indent=2)
+
+	# Save MP2 correlation energy convergence data
+	with open("branch/data/lst_E_corr_cycle_"+cycle_max_str+".json", "w") as f:
+		json.dump(lst_E_corr_cycle, f, indent=2)
+
+	print("Data saved to branch/data/iter_conv_cycle.json and branch/data/lst_E_corr_cycle.json")
 
 
