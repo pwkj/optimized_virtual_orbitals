@@ -5,6 +5,11 @@ The OVOS algorithm minimizes the second-order correlation energy (MP2)
 using orbital rotations.
 """
 
+import os
+# Force single-threaded
+os.environ['OPENBLAS_NUM_THREADS'] = '1'
+os.environ['OMP_NUM_THREADS'] = '1'
+
 from typing import Tuple
 
 import numpy as np
@@ -469,7 +474,17 @@ class OVOS:
 		"""
 
 		# Check that R_matrix is anti-symmetric
-		assert np.allclose(R_matrix + R_matrix.T, 0), "R_matrix is not anti-symmetric"
+		R_antisymmetric_test = R_matrix + R_matrix.T
+			# The anti-symmetric test matrix should be close to zero matrix
+		assert np.allclose(R_matrix + R_matrix.T, 0, atol=1e8), f"R_matrix is not anti-symmetric, max deviation {np.max(np.abs(R_antisymmetric_test))}"
+
+		# Check shape of R_matrix
+		expected_shape = (len(self.active_inocc_indices) + len(self.inactive_indices), len(self.active_inocc_indices) + len(self.inactive_indices))
+		assert R_matrix.shape == expected_shape, f"R_matrix shape is {R_matrix.shape}, expected {expected_shape}"
+
+
+
+
 
 		# Step (vii): Construct the unitary orbital rotation matrix U = exp(R)
 
@@ -577,23 +592,42 @@ class OVOS:
 
 
 # Molecule
-atom = "Li .0 .0 .0; H .0 .0 1.595" 
-#atom = "H .0 .0 .0; H .0 .0 0.74144"
-#atom = """O 0.0000 0.0000  0.1173; H 0.0000    0.7572  -0.4692; H 0.0000   -0.7572 -0.4692;""" #Angstrom
-basis = "STO-3G"
-#basis = "6-31G"
-unit="angstrom"
-mol = pyscf.M(atom=atom, basis=basis, unit=unit)
-	
-uhf = pyscf.scf.UHF(mol).run()
-mo_coeff = uhf.mo_coeff 
-# run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=6)
-# run_OVOS.run_ovos(mo_coeff)
+atom_choose_between = [
+	"H .0 .0 .0; H .0 .0 0.74144",  # H2 bond length 0.74144 Angstrom
+	"Li .0 .0 .0; H .0 .0 1.595",   # LiH bond length 1.595 Angstrom
+	"O 0.0000 0.0000  0.1173; H 0.0000    0.7572  -0.4692; H 0.0000   -0.7572 -0.4692;",  # H2O equilibrium geometry
+	"C  0.0000  0.0000  0.0000; H  0.0000  0.9350  0.5230; H  0.0000 -0.9350  0.5230;" # CH2 
+]
+# Basis set
+basis_choose_between = [
+	"STO-3G",
+	"6-31G",
+]
 
-# Calculate the full space MP2 correlation energy for reference
-mp2_full = OVOS(mol=mol, num_opt_virtual_orbs=8).MP2_energy(mo_coeffs=mo_coeff)[0]
-print("Full space MP2 correlation energy: ", mp2_full)
-print("")	
+# Unit
+unit="angstrom"
+
+
+# Select molecule and basis set
+select_atom, select_basis = (1,1) # Select molecule index here
+atom, basis = (atom_choose_between[select_atom], basis_choose_between[select_basis])
+
+# Get number of electrons and full space size in molecular orbitals
+mol = pyscf.M(atom=atom, basis=basis, unit=unit)
+	# Number of electrons
+num_electrons = mol.nelec[0] + mol.nelec[1]
+	# Full space size in molecular orbitals
+full_space_size = int(pyscf.scf.UHF(mol).run().mo_coeff.shape[1])
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -601,56 +635,121 @@ run_OVOS = OVOS(mol=mol, num_vir_ops=3)
 run_OVOS.run_OVOS()
 
 """
-Run OVOS algorithm for N cycles and store MP2 correlation energy convergence data.
+Run OVOS for different numbers of optimized virtual orbitals
 """
+run_different_virt_orbs = True
+if run_different_virt_orbs == True:
+	# Loop over different numbers of optimized virtual orbitals
+	# List of MP2 correlation energies for different numbers of optimized virtual orbitals
+	lst_E_corr_virt_orbs = [[],[]]  # [[E_corr_list], [num_opt_virtual_orbs_list]]
+	lst_MP2_virt_orbs = []  # [(num_opt_virtual_orbs, E_corr, iterations_till_convergence), ...]
 
-import time
+	# Retry bounds
+	max_retries = 1
+	retry_count = 0
 
-lst_E_corr_cycle = []
-iter_conv_cycle = []
+	# Set maximum number of optimized virtual orbitals to test
+		# Denoted in molecular orbitals (not spin orbitals)
+	max_opt_virtual_orbs = full_space_size*2 - num_electrons
+		# Set statrting number of optimized virtual orbitals and increment
+	num_opt_virtual_orbs_current = 0  # Start with number of occupied orbitals
+		# Incremenet by 2 for closed shell molecules
+	increment = 2 
 
-cycle_max = 0 # N = 100
-cycle_max_run = cycle_max
+	while num_opt_virtual_orbs_current < 4: #max_opt_virtual_orbs:  
+		# Increment num_opt_virtual_orbs until OVOS converges successfully
+		num_opt_virtual_orbs_current += increment 
 
-start_time = time.time()
-
-for cycle in range(cycle_max_run):
-	print("")
-	print("#### OVOS Cycle ", cycle+1, " ####")
-
-	# You can change the number of optimized virtual orbitals here
-	num_opt_virtual_orbs = 6
-	run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=num_opt_virtual_orbs)
-
-	lst_E_corr, iter_conv = run_OVOS.run_ovos(mo_coeff)
-	
-	# If the last cycle's correlation energy converges to a positive value, skip storing the data
-	if lst_E_corr[-1] > 0:
-		print("Warning: OVOS converged to a positive MP2 correlation energy. Skipping data storage for this cycle.")
 		print("")
+		print("#### OVOS with ", num_opt_virtual_orbs_current, " out of ", max_opt_virtual_orbs," optimized virtual orbitals (Retry count: ", retry_count,") ####")
 
-		# Do a new cycle still keeping the max number of cycles the same
-		cycle_max_run += 1
-	else:
-		lst_E_corr_cycle.append(lst_E_corr)
-		iter_conv_cycle.append(iter_conv)
+		try:
+			# Re-initialize molecule and UHF for each run
+			mol = pyscf.M(atom=atom, basis=basis, unit=unit)
+				
+			uhf = pyscf.scf.UHF(mol).run()
+			mo_coeff = uhf.mo_coeff 
 
-elapsed_time = time.time() - start_time
-minutes = elapsed_time / 60
-print(f"Cycle {len(lst_E_corr_cycle)} completed in {minutes:.2f} min. ({elapsed_time:.2f} sec.)")
-print("")
+			lst_E_corr = OVOS(mol=mol, num_opt_virtual_orbs=num_opt_virtual_orbs_current).run_ovos(mo_coeff)
 
-# Times taken for full cycles:
-# cycle_max = 100 --> 73.63 minutes (No optimizations)
-# cycle_max = 100 --> ... minutes (With optimizations, ofc. randomness affects times)
+			# run_OVOS got stuck in a non-converging loop
+			if len(lst_E_corr) >= 1000:
+				print("OVOS with ", num_opt_virtual_orbs_current, " optimized virtual orbitals did not converge. Rerunning with the same number of virtual orbitals.")
+				num_opt_virtual_orbs_current -= increment  # Decrement to retry the same number
+				continue
 
-# ererer
+			# run_OVOS converged to a positive MP2 correlation energy
+			if lst_E_corr[-1] > 0:
+				print("Warning: OVOS with ", num_opt_virtual_orbs_current, " optimized virtual orbitals converged to a positive MP2 correlation energy. Rerunning with the same number of virtual orbitals.")
+				num_opt_virtual_orbs_current -= increment  # Decrement to retry the same number
+				continue
+
+			# Add MP2 correlation energy for num_opt_virtual_orbs_current to list
+			lst_MP2_virt_orbs.append((num_opt_virtual_orbs_current, lst_E_corr[-1], len(lst_E_corr)))
+			lst_E_corr_virt_orbs[0].append(lst_E_corr)
+			lst_E_corr_virt_orbs[1].append(num_opt_virtual_orbs_current)
+
+			# Reset retry count on success
+			retry_count = 0
+
+		except AssertionError as e:
+			print(f"Error during OVOS with {num_opt_virtual_orbs_current} optimized virtual orbitals: {e}")
+			print("Rerunning with the same number of virtual orbitals.")
+
+			retry_count += 1
+			if retry_count >= max_retries:
+				print(f"Maximum retries reached for {num_opt_virtual_orbs_current} optimized virtual orbitals. Skipping to next.")
+				retry_count = 0
+				continue
+
+			num_opt_virtual_orbs_current -= increment  # Decrement to retry the same number
+			continue
+
+
+	# Print the final MP2 correlation energy after all OVOS and amount of iterations till convergence
+	print("")
+	for num_opt_virtual_orbs_current, E_corr, iter_ in lst_MP2_virt_orbs:
+		print("MP2 correlation energy, for ", num_opt_virtual_orbs_current, " optimized virtual orbitals:", E_corr, " @ ", iter_, " iterations till convergence")
+	print("")
+
+	# Print
+	print("Number of electrons: ", num_electrons)
+	print("Full space size in molecular orbitals: ", full_space_size)
+	print("Maximum number of optimized virtual orbitals tested: ", max_opt_virtual_orbs)
+	print("Total OVOS runs completed: ", len(lst_MP2_virt_orbs))
+	print("")
+
+	# Save data to JSON files
+	import json
+
+	str_name = "different_virt_orbs"
+
+	if select_atom == 0:
+		str_atom = "H2"
+	elif select_atom == 1:
+		str_atom = "LiH"
+	elif select_atom == 2:
+		str_atom = "H2O"
+	elif select_atom == 3:
+		str_atom = "CH2"
+
+	if select_basis == 0:
+		str_basis = "STO-3G"
+	elif select_basis == 1:
+		str_basis = "6-31G"
+
+	# Save MP2 correlation energy convergence data
+	with open("branch/data/"+str_atom+"/"+str_basis+"/lst_MP2_"+str_name+".json", "w") as f:
+		json.dump(lst_E_corr_virt_orbs, f, indent=2)
+
+	print("Data saved to branch/data/"+str_atom+"/"+str_basis+"/...")
+
 
 """
 Time profiling 
 """
-time_profile = True
-if time_profile == True and cycle_max == 0:
+time_profile = False
+if time_profile == True and run_single_ovos == True:
 	import cProfile
 	import pstats
 
@@ -667,23 +766,135 @@ if time_profile == True and cycle_max == 0:
 
 
 
+
+
+
+
+
+
+
+
+
+
 """
+Run OVOS algorithm for N cycles and store MP2 correlation energy convergence data.
 Save data to JSON files
 """
-save_data = False
-if save_data == True:
+run_cycles = False
+if run_cycles == True:
 	import json
+	
+	# Set maximum number of optimized virtual orbitals to test
+		# Denoted in molecular orbitals (not spin orbitals)
+	max_opt_virtual_orbs = full_space_size*2 - num_electrons
+		# Set statrting number of optimized virtual orbitals and increment
+	num_opt_virtual_orbs_current = 0  # Start with number of occupied orbitals
+	increment = 1 # Increment by 1 optimized virtual orbital
 
-	cycle_max_str = str(cycle_max)
+	# Retry bounds for vorb
+	max_retries_vorb = 3
+	retry_count_vorb = 0
 
-	# Save iteration convergence data
-	with open("branch/data/iter_conv_cycle_"+cycle_max_str+".json", "w") as f:
-		json.dump(iter_conv_cycle, f, indent=2)
+	for num_opt_virtual_orbs in range(1, max_opt_virtual_orbs+1, increment):
+		
+		print("")
+		print("#### OVOS with ", num_opt_virtual_orbs, " out of ", max_opt_virtual_orbs," optimized virtual orbitals ####")
+		print("")
 
-	# Save MP2 correlation energy convergence data
-	with open("branch/data/lst_E_corr_cycle_"+cycle_max_str+".json", "w") as f:
-		json.dump(lst_E_corr_cycle, f, indent=2)
+		# List of MP2 correlation energy convergence data for each cycle
+		lst_E_corr_cycle = []
+		iter_conv_cycle = []
 
-	print("Data saved to branch/data/iter_conv_cycle.json and branch/data/lst_E_corr_cycle.json")
+		# Number of OVOS cycles
+		cycle_max = 25 # N = 100
+		cycle_max_run = cycle_max # To keep track of actual number of runs including restarts
+		max_cycle_max = 100 # To avoid infinite loops
+		cycle = 0
 
+		# Retry bounds
+		max_retries = 5
+		retry_count = 0
 
+		while cycle < cycle_max:
+			print("")
+			print("#### OVOS Cycle ", cycle+1, " out of", cycle_max_run," ####")
+
+			try:
+				# Re-initialize molecule and UHF for each cycle
+				mol = pyscf.M(atom=atom, basis=basis, unit=unit)
+				uhf = pyscf.scf.UHF(mol).run()
+				mo_coeff = uhf.mo_coeff
+
+				run_OVOS = OVOS(mol=mol, num_opt_virtual_orbs=num_opt_virtual_orbs)
+
+				lst_E_corr = run_OVOS.run_ovos(mo_coeff)
+
+				# run_OVOS got stuck in a non-converging loop
+				if len(lst_E_corr) >= 600:
+					print("OVOS cycle did not converge. Restarting cycle.")
+					cycle_max_run += 1
+					continue
+
+				# If the last cycle's correlation energy converges to a positive value, skip storing the data
+				if lst_E_corr[-1] > 0:
+					print("Warning: OVOS converged to a positive MP2 correlation energy. Skipping data storage for this cycle.")
+					print("")
+
+					# Do a new cycle still keeping the max number of cycles the same
+					cycle_max_run += 1
+				else:
+					lst_E_corr_cycle.append(lst_E_corr)
+
+					# Reset retry count on success
+					retry_count = 0
+					retry_count_vorb = 0
+
+					# Increment cycle count only on successful completion
+					cycle += 1
+				
+			except AssertionError as e:
+				print(f"Error during OVOS cycle: {e}")
+				print("Restarting cycle.")
+				cycle_max_run += 1
+
+				retry_count += 1
+				if retry_count >= max_retries:
+					print(f"Maximum retries reached for this cycle. Skipping to next.")
+					retry_count = 0
+					continue
+
+				retry_count_vorb += 1
+				if retry_count_vorb >= max_retries_vorb:
+					print(f"Maximum retries reached for number of optimized virtual orbitals. Moving to next number of virtual orbitals.")
+					retry_count_vorb = 0
+					break
+
+				if cycle_max_run >= max_cycle_max:
+					print("Reached maximum allowed cycles. Exiting.")
+					break
+
+				continue
+
+		str_name = "cycle_"+str(cycle_max)
+		str_name += "_vorb_"+str(num_opt_virtual_orbs)
+		
+		if select_atom == 0:
+			str_atom = "H2"
+		elif select_atom == 1:
+			str_atom = "LiH"
+		elif select_atom == 2:
+			str_atom = "H2O"
+
+		if select_basis == 0:
+			str_basis = "STO-3G"
+		elif select_basis == 1:
+			str_basis = "6-31G"
+
+		# If lst_E_corr_cycle is empty, skip saving
+		if len(lst_E_corr_cycle) == 0:
+			print("No successful OVOS cycles completed for ", num_opt_virtual_orbs, " optimized virtual orbitals. Skipping data saving.")
+			continue
+
+		# Save MP2 correlation energy convergence data
+		with open("branch/data/"+str_atom+"/"+str_basis+"/lst_E_corr_"+str_name+".json", "w") as f:
+			json.dump(lst_E_corr_cycle, f, indent=2)
