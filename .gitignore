@@ -1,8 +1,10 @@
 # Local development folders
 local/
-branch/
 backup/
-images/
+branch/
+trash/
+present/
+Thesis/
 
 # Python
 __pycache__/
@@ -20,11 +22,22 @@ env/
 # IDE
 .vscode/
 .idea/
-.github/
 *.swp
 *.swo
 *~
 
-# uv
-uv.lock
-pyproject.toml
+# VS Code personal settings
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Folders
+.github/
+
+# Files
+*.lock
+*.log
+*.tmp
+
+# Large PDF files
+Thesis/articles/*.pdf
