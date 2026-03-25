@@ -1,0 +1,43 @@
+# Local development folders
+local/
+backup/
+branch/
+trash/
+present/
+Thesis/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# VS Code personal settings
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+
+# Folders
+.github/
+
+# Files
+*.lock
+*.log
+*.tmp
+
+# Large PDF files
+Thesis/articles/*.pdf
